@@ -1,0 +1,6 @@
+{
+  "name": "PageAlign CRO",
+  "description": "E-commerce Conversion Rate Optimization (CRO) and Personalization Web Application. Scrape D2C landing pages and run interactive AI-powered CRO optimization loops targeting custom core audiences.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
