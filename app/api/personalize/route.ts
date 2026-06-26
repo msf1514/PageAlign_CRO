@@ -292,10 +292,11 @@ export async function POST(req: NextRequest) {
 
           Analyze and refine the CONVERSION COPY only. Do NOT generate any HTML in this phase.
           CRITICAL RULES:
-          1. Keep the optimized Hero Heading/Title punchy and human-written: strictly 5 to 11 words (approx. 45 to 70 characters max).
-          2. Personalize the Hero Title to match the hook, visuals, or copy angle shown in the [Ad Creative] image/text for perfect ad-to-page scent continuity.
-          3. Build on the [Current Optimized Sections So Far] — improve them; never discard good prior copy. Cover hero, social proof, features/benefits, FAQ, and offer/CTA where present.
-          4. Set "needs_more_refinement" to false once the copy is well-optimized and further passes would yield no meaningful gains (this lets the loop stop early and save tokens).
+          1. The [User Vision / Audience] is a PRIMARY driver: tailor tone, vocabulary, which benefits you lead with, the objections you pre-empt, social-proof selection, and CTA wording to this specific audience. The ad creative sets the "scent"; the audience sets the voice and priorities — honor both.
+          2. Keep the optimized Hero Heading/Title punchy and human-written: strictly 5 to 11 words (approx. 45 to 70 characters max), matching the hook/angle of the [Ad Creative].
+          3. Personalize copy for the EXISTING sections — do NOT invent whole new page sections here; the page structure must stay close to the original. Build on [Current Optimized Sections So Far]; never discard good prior copy. Cover hero, social proof, features/benefits, FAQ, and offer/CTA where present.
+          4. In each section's "cro_justification", briefly state how the change serves the target audience.
+          5. Set "needs_more_refinement" to false once the copy is well-optimized and further passes would yield no meaningful gains (this lets the loop stop early and save tokens).
 
           Format your response strictly according to the requested JSON response schema.
         `
@@ -364,11 +365,14 @@ export async function POST(req: NextRequest) {
         ${userVision}
 
         REQUIREMENTS:
-        - Output ONLY raw HTML (no markdown, no code fences, no commentary). Start with <!DOCTYPE html>.
-        - Style with Tailwind CSS; assume <script src="https://cdn.tailwindcss.com"></script> is loaded in the <head>.
-        - Reconstruct the real page structure, brand identity, headings, benefits, review snippets, FAQ, and checkout CTAs from [Scraped Data], replacing copy with the [Final Optimized Copy].
-        - IMAGES (important): Use ONLY image URLs that appear VERBATIM in [Scraped Data]. Never invent, guess, shorten, or modify an image URL, and never use placeholder-image services. Scraped product images are frequently hotlink-protected and will 404 inside the iframe, so for large HERO / banner / background areas DO NOT depend on an external image — use a tasteful CSS gradient or solid brand-colored background instead. Reuse real scraped image URLs only for small inline product shots or logos, and only if present verbatim. Never render a broken-image placeholder.
-        - Use generous responsive padding, modern layouts (grids/columns), strong typography, clear risk-reversal banners, and the high-contrast/accessibility treatments from [User Vision]. Production-grade, never a basic card. It will be rendered inside an iframe for live conversion comparison.
+        - Output ONLY raw HTML (no markdown, no code fences, no commentary). Start with <!DOCTYPE html>. Style with Tailwind via <script src="https://cdn.tailwindcss.com"></script>.
+        - THIS IS A PERSONALIZATION, NOT A REDESIGN. Stay faithful to the original page:
+          • Keep the original section ORDER and overall layout/structure from [Scraped Data]. Do not reorder, drop, or wholesale-restructure sections, and do not impose a different design language.
+          • Reuse the brand's EXISTING colour palette and visual tone. Infer the brand's primary / accent / background colours from the brand identity, logo, the scraped data, and the ad creative, and stick to them — do NOT introduce a new colour scheme or restyle the brand.
+          • Match the original's typographic feel and spacing rather than "upgrading" it.
+        - Replace the copy with [Final Optimized Copy]. You MAY add only a FEW audience-relevant elements (e.g. a trust badge, a reassurance / guarantee line, one relevant FAQ) when they fit naturally and serve [User Vision / Audience] — never revamp the page.
+        - IMAGES: Use ONLY image URLs that appear VERBATIM in [Scraped Data]; never invent, guess, shorten or modify a URL, and never use placeholder-image services. Scraped images are often hotlink-protected and will 404 inside the iframe, so for large hero / banner / background areas use a CSS background in the BRAND'S colours instead of an external image. Use real scraped URLs only for small inline product shots / logos, and never render a broken-image placeholder.
+        - Apply only the accessibility / contrast adjustments explicitly requested in [User Vision]. It renders inside an iframe for live comparison.
       `
     });
 
