@@ -147,7 +147,8 @@ export async function POST(req: NextRequest) {
     }
 
     // STEP A: Firecrawl Scrape / Mock Retrieval
-    let scrapedContent = "";
+    let scrapedContent = ""; // markdown/text — used by the copy phase (cheap)
+    let scrapedHtml = "";    // cleaned HTML/DOM — used by the render phase (layout fidelity)
     let isMocked = false;
 
     if (process.env.FIRECRAWL_API_KEY) {
@@ -169,6 +170,10 @@ export async function POST(req: NextRequest) {
           const fcData = await firecrawlRes.json();
           // v1 returns { success, data: { markdown, html, ... } }
           scrapedContent = fcData.data?.markdown || fcData.data?.html || "";
+          // Keep the cleaned HTML (DOM structure, classes, inline styles, real
+          // image URLs) for the render phase so it preserves the original
+          // layout/colours. Capped to bound tokens/latency under the time budget.
+          scrapedHtml = (fcData.data?.html || "").slice(0, 60000);
         } else {
           console.error("Firecrawl v1 scrape returned non-OK status:", firecrawlRes.status);
         }
@@ -352,8 +357,8 @@ export async function POST(req: NextRequest) {
       text: `
         Build the FINAL personalized landing page as a single, complete HTML document.
 
-        [Scraped Data / Base Landing Page Content]:
-        ${scrapedContent}
+        [ORIGINAL PAGE HTML — your starting point; preserve its DOM structure, section order, element classes, inline styles, image URLs and colours]:
+        ${scrapedHtml || scrapedContent}
 
         [Final Optimized Copy (apply these exactly)]:
         ${JSON.stringify(copyState.sections_optimized, null, 2)}
@@ -366,12 +371,12 @@ export async function POST(req: NextRequest) {
 
         REQUIREMENTS:
         - Output ONLY raw HTML (no markdown, no code fences, no commentary). Start with <!DOCTYPE html>. Style with Tailwind via <script src="https://cdn.tailwindcss.com"></script>.
-        - THIS IS A PERSONALIZATION, NOT A REDESIGN. Stay faithful to the original page:
-          • Keep the original section ORDER and overall layout/structure from [Scraped Data]. Do not reorder, drop, or wholesale-restructure sections, and do not impose a different design language.
-          • Reuse the brand's EXISTING colour palette and visual tone. Infer the brand's primary / accent / background colours from the brand identity, logo, the scraped data, and the ad creative, and stick to them — do NOT introduce a new colour scheme or restyle the brand.
-          • Match the original's typographic feel and spacing rather than "upgrading" it.
-        - Replace the copy with [Final Optimized Copy]. You MAY add only a FEW audience-relevant elements (e.g. a trust badge, a reassurance / guarantee line, one relevant FAQ) when they fit naturally and serve [User Vision / Audience] — never revamp the page.
-        - IMAGES: Use ONLY image URLs that appear VERBATIM in [Scraped Data]; never invent, guess, shorten or modify a URL, and never use placeholder-image services. Scraped images are often hotlink-protected and will 404 inside the iframe, so for large hero / banner / background areas use a CSS background in the BRAND'S colours instead of an external image. Use real scraped URLs only for small inline product shots / logos, and never render a broken-image placeholder.
+        - THIS IS A PERSONALIZATION, NOT A REDESIGN. Work FROM the [ORIGINAL PAGE HTML] above:
+          • Keep its DOM structure, section ORDER, element classes and inline styles. Do not reorder, drop, or wholesale-restructure sections, and do not impose a different design language.
+          • Reuse the brand's EXISTING colours, fonts and visual tone taken from the HTML's inline styles, class names, logo and the ad creative — do NOT introduce a new colour scheme. External CSS isn't included, so keep inline styles as-is and approximate class-based styling with equivalent Tailwind utilities so it still renders.
+          • Only SWAP the text for [Final Optimized Copy]; match the original's spacing/typography rather than "upgrading" it.
+        - You MAY add only a FEW audience-relevant elements (e.g. a trust badge, a reassurance / guarantee line, one relevant FAQ) when they fit naturally and serve [User Vision / Audience] — never revamp the page.
+        - IMAGES: Use ONLY image URLs (src/srcset) that appear VERBATIM in the [ORIGINAL PAGE HTML]; never invent, guess, shorten or modify a URL, and never use placeholder-image services. Scraped images are often hotlink-protected and may 404 inside the iframe, so for large hero / banner / background areas prefer a CSS background in the BRAND'S colours over an external image. Use real URLs only for small inline product shots / logos, and never render a broken-image placeholder.
         - Apply only the accessibility / contrast adjustments explicitly requested in [User Vision]. It renders inside an iframe for live comparison.
       `
     });
