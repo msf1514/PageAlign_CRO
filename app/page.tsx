@@ -23,6 +23,9 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 import OutputPanel from "@/components/OutputPanel";
 import { CroAgentResponse } from "@/app/lib/croAgentPrompt";
+import UserMenu from "@/components/UserMenu";
+import { createClient } from "@/lib/supabase/client";
+import { isSupabaseConfigured } from "@/lib/supabase/config";
 
 // Preset configurations to give users immediate test objects
 const PRESETS = [
@@ -67,6 +70,7 @@ export default function CroPage() {
   const [currentLoopPass, setCurrentLoopPass] = useState(1);
   const [errorMessage, setErrorMessage] = useState("");
   const [croResult, setCroResult] = useState<any>(null);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "unauth" | "error">("idle");
 
   // Progressive loading text sequence ticker body indices
   const [tickIndex, setTickIndex] = useState(0);
@@ -234,6 +238,53 @@ export default function CroPage() {
   };
 
   /**
+   * Saves a successful optimization to the signed-in user's account.
+   * No-ops when Supabase isn't configured or nobody is signed in.
+   */
+  const persistRun = async (data: any) => {
+    if (!isSupabaseConfigured) return;
+    try {
+      setSaveStatus("saving");
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setSaveStatus("unauth");
+        return;
+      }
+
+      let title = targetUrl;
+      try {
+        title = new URL(targetUrl).host;
+      } catch {
+        // keep raw URL as the title if it doesn't parse
+      }
+
+      const { error } = await supabase.from("cro_runs").insert({
+        user_id: user.id,
+        title,
+        target_url: targetUrl.trim(),
+        user_vision: userVision.trim() || null,
+        ad_creative: adInputMode === "text" ? adCreative.trim() || null : null,
+        mode: data.mode ?? null,
+        confidence_score: typeof data.confidence_score === "number" ? data.confidence_score : null,
+        iteration: data.iteration ?? null,
+        scrape_method: data.scrape_method ?? null,
+        original_source_is_mocked: data.original_source_is_mocked ?? null,
+        global_adjustments: data.global_adjustments ?? null,
+        sections_optimized: data.sections_optimized ?? null,
+        change_log_summary: data.change_log_summary ?? null,
+        scraped_text_preview: data.scraped_text_preview ?? null,
+        enhanced_html: data.enhanced_html ?? null,
+      });
+      setSaveStatus(error ? "error" : "saved");
+    } catch {
+      setSaveStatus("error");
+    }
+  };
+
+  /**
    * Validates form parameters and coordinates server-side optimizations.
    */
   const handleOptimize = async (e?: React.FormEvent) => {
@@ -243,6 +294,7 @@ export default function CroPage() {
 
     setErrorMessage("");
     setCroResult(null);
+    setSaveStatus("idle");
     setCurrentLoopPass(1);
     setTickIndex(0);
     setLogs([]); // Reset logs trace
@@ -329,6 +381,7 @@ export default function CroPage() {
       addLocalLog("🎉 Complete conversion alignment report finalized and compiled successfully!", "success");
       setCroResult(data);
       setStatus("success");
+      persistRun(data);
     } catch (err: any) {
       console.error(err);
       addLocalLog(`❌ CRO Optimization failed: ${err.message || "An unexpected network or model failure occurred."}`, "error");
@@ -369,8 +422,9 @@ export default function CroPage() {
           </div>
 
           <div className="flex items-center gap-4 text-xs font-mono text-gray-500">
-            <span className="hidden md:inline bg-gray-100 px-2.5 py-1 rounded-md text-gray-600 font-medium">Gemini 3.5 Flash Model ACTIVE</span>
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Server Node Connected
+            <span className="hidden lg:inline bg-gray-100 px-2.5 py-1 rounded-md text-gray-600 font-medium">Gemini Model ACTIVE</span>
+            <span className="hidden md:flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Server Node Connected</span>
+            <UserMenu />
           </div>
         </div>
       </header>
@@ -926,7 +980,23 @@ export default function CroPage() {
               className="space-y-4"
               id="success-output-panel-container"
             >
-              <OutputPanel 
+              {saveStatus !== "idle" && (
+                <div className="max-w-7xl mx-auto mb-4 text-xs">
+                  {saveStatus === "saving" && <span className="text-gray-500">Saving to your account…</span>}
+                  {saveStatus === "saved" && (
+                    <span className="text-emerald-600 font-medium">✓ Saved to your account — see it under “My runs”.</span>
+                  )}
+                  {saveStatus === "unauth" && (
+                    <span className="text-gray-500">
+                      <a href="/login" className="text-blue-600 underline hover:text-blue-700">Sign in</a> to save this run to your account.
+                    </span>
+                  )}
+                  {saveStatus === "error" && (
+                    <span className="text-amber-600">Couldn’t save this run — it’s still shown below.</span>
+                  )}
+                </div>
+              )}
+              <OutputPanel
                 data={croResult} 
                 onReset={() => {
                   setStatus("idle");
