@@ -237,12 +237,29 @@ export async function POST(req: NextRequest) {
       ],
     };
 
+    // Time budget so the function returns a result BEFORE the platform timeout
+    // (Vercel killed this at 60s -> 504) instead of dying mid-run. Scales with
+    // maxDuration: on Pro (maxDuration=300) more copy passes run; on Hobby (60s)
+    // it stops copy early and still renders the page. We reserve time for the
+    // (slow) HTML render so it always completes.
+    const startedAt = Date.now();
+    const softBudgetMs = Math.max(20_000, (maxDuration - 8) * 1000);
+    const renderReserveMs = 24_000;
+    const copyDeadline = startedAt + Math.max(12_000, softBudgetMs - renderReserveMs);
+
     // ── PHASE 1: Iterative COPY refinement (cheap, no HTML) ──────────────────
     let copyState: any = null;
     let previousChangeLog = "";
     let loopsRun = 0;
 
     for (let loopIndex = 1; loopIndex <= maxLoops; loopIndex++) {
+      // Stop adding copy passes once the time budget is spent (keep ≥1 pass),
+      // leaving room for the render so we don't hit the function timeout.
+      if (loopIndex > 1 && Date.now() > copyDeadline) {
+        console.warn(`Stopping copy loop early at pass ${loopIndex} (time budget reached).`);
+        break;
+      }
+
       // Rate-limit backoff window to minimize 429 errors.
       await sleep(220);
 
@@ -363,7 +380,10 @@ export async function POST(req: NextRequest) {
     let enhancedHtml = stripCodeFences(renderResponse.text || "");
 
     // ── PHASE 3: One polish pass over the rendered HTML ──────────────────────
-    if (enhancedHtml) {
+    // Only if enough budget remains for another (slow) HTML generation —
+    // otherwise we ship the solid pre-polish render rather than risk a timeout.
+    const timeForPolish = Date.now() < startedAt + softBudgetMs - 14_000;
+    if (enhancedHtml && timeForPolish) {
       try {
         await sleep(220);
         const polishResponse = await generate({
