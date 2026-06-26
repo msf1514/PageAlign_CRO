@@ -251,6 +251,9 @@ export async function POST(req: NextRequest) {
     const softBudgetMs = Math.max(20_000, (maxDuration - 8) * 1000);
     const renderReserveMs = 24_000;
     const copyDeadline = startedAt + Math.max(12_000, softBudgetMs - renderReserveMs);
+    // Always run at least this many refinement passes before honoring early-stop,
+    // so the copy genuinely iterates (the model otherwise declares "done" on pass 1).
+    const MIN_CYCLES = Math.min(3, maxLoops);
 
     // ── PHASE 1: Iterative COPY refinement (cheap, no HTML) ──────────────────
     let copyState: any = null;
@@ -258,9 +261,9 @@ export async function POST(req: NextRequest) {
     let loopsRun = 0;
 
     for (let loopIndex = 1; loopIndex <= maxLoops; loopIndex++) {
-      // Stop adding copy passes once the time budget is spent (keep ≥1 pass),
-      // leaving room for the render so we don't hit the function timeout.
-      if (loopIndex > 1 && Date.now() > copyDeadline) {
+      // Stop adding copy passes once the time budget is spent, but always allow
+      // at least MIN_CYCLES passes; leave room for the render to avoid a timeout.
+      if (loopIndex > MIN_CYCLES && Date.now() > copyDeadline) {
         console.warn(`Stopping copy loop early at pass ${loopIndex} (time budget reached).`);
         break;
       }
@@ -336,10 +339,11 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Early-stop: model signals it's done, or confidence is already high.
+      // Early-stop only AFTER at least MIN_CYCLES passes, so the copy actually
+      // iterates a few times instead of the model declaring "done" on pass 1.
       const conf = typeof copyState?.confidence_score === "number" ? copyState.confidence_score : 0;
       const confPct = conf <= 1 ? conf * 100 : conf;
-      if (copyState?.needs_more_refinement === false || confPct >= 92) {
+      if (loopIndex >= MIN_CYCLES && (copyState?.needs_more_refinement === false || confPct >= 92)) {
         break;
       }
     }
@@ -376,7 +380,7 @@ export async function POST(req: NextRequest) {
           • Reuse the brand's EXISTING colours, fonts and visual tone taken from the HTML's inline styles, class names, logo and the ad creative — do NOT introduce a new colour scheme. External CSS isn't included, so keep inline styles as-is and approximate class-based styling with equivalent Tailwind utilities so it still renders.
           • Only SWAP the text for [Final Optimized Copy]; match the original's spacing/typography rather than "upgrading" it.
         - You MAY add only a FEW audience-relevant elements (e.g. a trust badge, a reassurance / guarantee line, one relevant FAQ) when they fit naturally and serve [User Vision / Audience] — never revamp the page.
-        - IMAGES: Use ONLY image URLs (src/srcset) that appear VERBATIM in the [ORIGINAL PAGE HTML]; never invent, guess, shorten or modify a URL, and never use placeholder-image services. Scraped images are often hotlink-protected and may 404 inside the iframe, so for large hero / banner / background areas prefer a CSS background in the BRAND'S colours over an external image. Use real URLs only for small inline product shots / logos, and never render a broken-image placeholder.
+        - IMAGES — REUSE THE ORIGINAL PAGE'S IMAGES: copy the real image URLs (img src, srcset, and CSS background-image URLs) VERBATIM from the [ORIGINAL PAGE HTML] into the personalized page — hero/banner images, product shots, and brand logos — so it visually matches the original. Keep them in their original positions. Never invent, guess, shorten, or modify a URL, and never use a placeholder-image service. Only fall back to a brand-coloured CSS background for a section that genuinely has no image in the original HTML.
         - Apply only the accessibility / contrast adjustments explicitly requested in [User Vision]. It renders inside an iframe for live comparison.
       `
     });
