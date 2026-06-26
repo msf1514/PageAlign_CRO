@@ -1,6 +1,7 @@
 // Path: app/api/config/route.ts
 
 import { NextRequest, NextResponse } from "next/server";
+import { getGeminiKeys } from "@/app/lib/geminiClient";
 
 /**
  * Endpoint to safely detect whether required platform API secrets are present in the server-side environment.
@@ -10,10 +11,12 @@ import { NextRequest, NextResponse } from "next/server";
  */
 export async function GET(req: NextRequest) {
   try {
+    const geminiKeys = getGeminiKeys();
     return NextResponse.json({
       hasFirecrawlKey: !!process.env.FIRECRAWL_API_KEY,
-      hasGeminiKey: !!process.env.EXTERNAL_GEMINI_API_KEY || !!process.env.GEMINI_API_KEY,
-      hasExternalGeminiKey: !!process.env.EXTERNAL_GEMINI_API_KEY,
+      hasGeminiKey: geminiKeys.length > 0,
+      hasExternalGeminiKey: !!process.env.EXTERNAL_GEMINI_API_KEY || !!process.env.EXTERNAL_GEMINI_API_KEYS,
+      geminiKeyCount: geminiKeys.length,
     });
   } catch (error) {
     console.error("Failed to fetch environment config status:", error);

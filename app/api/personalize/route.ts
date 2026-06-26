@@ -1,28 +1,15 @@
 // Path: app/api/personalize/route.ts
 
 import { NextRequest, NextResponse } from "next/server";
-import { GoogleGenAI, Type } from "@google/genai";
+import { Type } from "@google/genai";
 import { CRO_AGENT_SYSTEM_PROMPT } from "@/app/lib/croAgentPrompt";
+import { GEMINI_MODEL, getGeminiKeys, createGeminiRotator, type GenerateFn } from "@/app/lib/geminiClient";
 
-/**
- * Initializes the GoogleGenAI SDK with the server-side API key and User-Agent telemetry context.
- */
-function getAiClient(): GoogleGenAI {
-  const apiKey = process.env.EXTERNAL_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "The server-side EXTERNAL_GEMINI_API_KEY environment variable is missing. Please add your API key in the application's Secret Key settings as EXTERNAL_GEMINI_API_KEY."
-    );
-  }
-  return new GoogleGenAI({
-    apiKey: apiKey,
-    httpOptions: {
-      headers: {
-        "User-Agent": "aistudio-build",
-      },
-    },
-  });
-}
+// This handler runs 5–10 sequential Gemini calls, each generating a full HTML
+// page, so it needs Node runtime and a long timeout. (Vercel caps maxDuration
+// at 60s on Hobby; raise to 300 on Pro for 10-loop runs.)
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 /**
  * Helper delay function to avoid rate-limiting triggers between nested loop passes.
@@ -34,14 +21,25 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Strips markdown code fences (```html ... ```) the model sometimes wraps raw
+ * HTML output in, and trims surrounding whitespace.
+ */
+function stripCodeFences(text: string): string {
+  return text
+    .replace(/^\s*```(?:html|HTML)?\s*/, "")
+    .replace(/\s*```\s*$/, "")
+    .trim();
+}
+
+/**
  * Dynamically simulates a page retrieve scrape of a target e-commerce URL in Markdown
  * when no Firecrawl API credentials are provided or if their validation fails.
- * @param aiClient Configured parent GoogleGenAI engine
+ * @param generate Key-rotating Gemini generate function
  * @param url Target URL to inspect/simulate
  * @param audience Custom user objective or segment description to adapt mock tags
  * @returns Clean Markdown e-commerce page blueprint
  */
-async function generateMockScrape(aiClient: GoogleGenAI, url: string, audience: string): Promise<string> {
+async function generateMockScrape(generate: GenerateFn, url: string, audience: string): Promise<string> {
   try {
     const domain = new URL(url).hostname.replace("www.", "");
     const brandName = domain.split(".")[0].toUpperCase() || "D2C Brand";
@@ -59,8 +57,8 @@ async function generateMockScrape(aiClient: GoogleGenAI, url: string, audience: 
       Do NOT invent options that deviate from a standard premium brand. Maintain realistic e-commerce copywriting.
     `;
 
-    const response = await aiClient.models.generateContent({
-      model: "gemini-3.5-flash",
+    const response = await generate({
+      model: GEMINI_MODEL,
       contents: prompt,
       config: {
         systemInstruction: "You are an e-commerce inspector and page retriever returning high-quality markdown snapshots.",
@@ -88,8 +86,9 @@ export async function POST(req: NextRequest) {
     const adCreative = body.ad_creative || body.adCreative || "";
     const adImageBase64 = body.ad_image || body.adImage || "";
     
-    // Dynamically retrieve the configured GoogleGenAI agent client
-    const aiClient = getAiClient();
+    // Build a key-rotating Gemini generator. Falls back across multiple keys on
+    // rate-limit / quota errors — valuable for free-tier keys across 5–10 loops.
+    const generate = createGeminiRotator(getGeminiKeys());
     
     // Bounds guard: Limit max loops strictly between 5 and 10 to satisfy constraint
     let maxLoops = parseInt(body.max_loops || body.maxLoops || "5", 10);
@@ -147,7 +146,7 @@ export async function POST(req: NextRequest) {
 
     if (process.env.FIRECRAWL_API_KEY) {
       try {
-        const firecrawlRes = await fetch("https://api.firecrawl.dev/v0/scrape", {
+        const firecrawlRes = await fetch("https://api.firecrawl.dev/v1/scrape", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -155,15 +154,17 @@ export async function POST(req: NextRequest) {
           },
           body: JSON.stringify({
             url: targetUrl,
-            pageOptions: {
-              onlyMainContent: true,
-            },
+            formats: ["markdown", "html"],
+            onlyMainContent: true,
           }),
         });
 
         if (firecrawlRes.ok) {
           const fcData = await firecrawlRes.json();
+          // v1 returns { success, data: { markdown, html, ... } }
           scrapedContent = fcData.data?.markdown || fcData.data?.html || "";
+        } else {
+          console.error("Firecrawl v1 scrape returned non-OK status:", firecrawlRes.status);
         }
       } catch (err) {
         console.error("Firecrawl request error, executing fallback scrape:", err);
@@ -171,22 +172,25 @@ export async function POST(req: NextRequest) {
     }
 
     if (!scrapedContent) {
-      scrapedContent = await generateMockScrape(aiClient, targetUrl, userVision);
+      scrapedContent = await generateMockScrape(generate, targetUrl, userVision);
       isMocked = true;
     }
 
-    // STEP B: The Optimization Loop
-    let previousChangeLog = "";
-    let finalPayload: any = null;
+    // STEP B: Two-phase optimization.
+    // Phase 1 iterates on COPY only (cheap, no HTML). Phase 2 renders the full
+    // HTML once. Phase 3 runs a single polish pass. This replaces the old
+    // approach that regenerated the entire HTML on every loop and discarded all
+    // but the last — far fewer expensive HTML generations for the same result.
 
-    // Strict Gemini JSON Response Schema
-    const responseSchema = {
+    // Schema for the cheap copy-only iterations (no enhanced_html).
+    const copyResponseSchema = {
       type: Type.OBJECT,
       properties: {
         status: { type: Type.STRING },
         iteration: { type: Type.INTEGER },
         mode: { type: Type.STRING },
         confidence_score: { type: Type.NUMBER },
+        needs_more_refinement: { type: Type.BOOLEAN },
         global_adjustments: {
           type: Type.OBJECT,
           properties: {
@@ -214,22 +218,26 @@ export async function POST(req: NextRequest) {
           },
         },
         change_log_summary: { type: Type.STRING },
-        enhanced_html: { type: Type.STRING },
       },
       required: [
         "status",
         "iteration",
         "mode",
         "confidence_score",
+        "needs_more_refinement",
         "global_adjustments",
         "sections_optimized",
         "change_log_summary",
-        "enhanced_html",
       ],
     };
 
+    // ── PHASE 1: Iterative COPY refinement (cheap, no HTML) ──────────────────
+    let copyState: any = null;
+    let previousChangeLog = "";
+    let loopsRun = 0;
+
     for (let loopIndex = 1; loopIndex <= maxLoops; loopIndex++) {
-      // Data Hydration Safety & rate limit backoff sleep window to minimize 429 errors
+      // Rate-limit backoff window to minimize 429 errors.
       await sleep(220);
 
       const promptParts: any[] = [];
@@ -239,13 +247,13 @@ export async function POST(req: NextRequest) {
 
       promptParts.push({
         text: `
-          ### EXECUTION CYCLE ${loopIndex} OF ${maxLoops} ###
+          ### COPY REFINEMENT CYCLE ${loopIndex} OF ${maxLoops} ###
 
           [Scraped Data / Base Landing Page Content]:
           ${scrapedContent}
 
           [Ad Creative / Ad Copy text (if manual)]:
-          ${adCreative || "None provided in text. Please analyze visual elements and text from the attached screenshot part of the request contents to match the ad scent!"}
+          ${adCreative || "None provided in text. Please analyze visual elements and text from the attached ad screenshot to match the ad scent!"}
 
           [User Vision / Audience targeting / Accessibility requests]:
           ${userVision}
@@ -256,49 +264,137 @@ export async function POST(req: NextRequest) {
           [Previous Changes Log]:
           ${previousChangeLog || "No previous passes have occurred."}
 
-          Please analyze, optimize, and output structural optimizations. 
+          [Current Optimized Sections So Far (refine these — do NOT start over)]:
+          ${copyState ? JSON.stringify(copyState.sections_optimized, null, 2) : "None yet — produce the first optimization pass."}
+
+          Analyze and refine the CONVERSION COPY only. Do NOT generate any HTML in this phase.
           CRITICAL RULES:
-          1. Keep the optimized Hero Heading/Title punchy and human-written. It should strictly contain between 5 to 11 words (approximately 45 to 70 characters max).
-          2. Personalize the Hero Title to specifically match the hook, visuals, or copy angle shown in the [Ad Creative] visual input image file or ad copy text to maximize conversion confidence and secure perfect ad-to-page scent continuity.
-          3. Generate a complete, beautifully designed single-page HTML output for 'enhanced_html'. This MUST contain the full enhanced/personalized version of the landing page, styled using Tailwind CSS (assume the CDN script <script src="https://cdn.tailwindcss.com"></script> is loaded in the <head>). 
-             - Reconstruct the actual page structure, brand logo/identities, headings, list benefits, review snippets, FAQ sections, and final checkout CTAs from [Scraped Data / Base Landing Page Content] as a foundation.
-             - Under no circumstances output a basic card. Replace the texts with the highly aligned optimized copy.
-             - Structure the markup with generous responsive padding, modern layouts (such as beautiful side-by-side grids or content columns), gorgeous typography styles, clear risk-reversal banners, and high-contrast accessibility tags requested in [User Vision].
-             - Ensure it looks like a premium, production-grade custom design, containing realistic visuals (preserving and reusing the exact original image URLs, product shots, background assets, and brand logos found in [Scraped Data] so they display properly in the personalized output preview), and fully functional elements. This will be rendered inside an iframe for side-by-side live conversion comparison!
-          
+          1. Keep the optimized Hero Heading/Title punchy and human-written: strictly 5 to 11 words (approx. 45 to 70 characters max).
+          2. Personalize the Hero Title to match the hook, visuals, or copy angle shown in the [Ad Creative] image/text for perfect ad-to-page scent continuity.
+          3. Build on the [Current Optimized Sections So Far] — improve them; never discard good prior copy. Cover hero, social proof, features/benefits, FAQ, and offer/CTA where present.
+          4. Set "needs_more_refinement" to false once the copy is well-optimized and further passes would yield no meaningful gains (this lets the loop stop early and save tokens).
+
           Format your response strictly according to the requested JSON response schema.
         `
       });
 
-      const response = await aiClient.models.generateContent({
-        model: "gemini-3.5-flash",
+      const response = await generate({
+        model: GEMINI_MODEL,
         contents: { parts: promptParts },
         config: {
           systemInstruction: CRO_AGENT_SYSTEM_PROMPT,
           responseMimeType: "application/json",
-          responseSchema: responseSchema,
+          responseSchema: copyResponseSchema,
         },
       });
       const responseText = response.text || "";
 
       if (!responseText) {
-        throw new Error(`Empty response returned from Gemini API on cycle iteration ${loopIndex}`);
+        if (copyState) break; // keep best-effort prior state
+        throw new Error(`Empty response returned from Gemini API on copy cycle ${loopIndex}`);
       }
 
-      // Try-catch parse safety wrapper for robust rendering stream interceptor
       try {
         const parsed = JSON.parse(responseText.trim());
-        parsed.iteration = loopIndex; // override with actual index
-        finalPayload = parsed;
-        previousChangeLog = parsed.change_log_summary || "";
+        parsed.iteration = loopIndex;
+        copyState = parsed;
+        previousChangeLog = parsed.change_log_summary || previousChangeLog;
+        loopsRun = loopIndex;
       } catch (parseError) {
-        console.error("JSON payload parse warning in loop pass:", loopIndex, parseError);
-        // Attempt a manual fallback or maintain previous loop state as best effort
-        if (!finalPayload) {
-          throw new Error("Unable to establish base compliant JSON configuration from the CRO loop.");
+        console.error("Copy JSON parse warning on pass:", loopIndex, parseError);
+        if (!copyState) {
+          throw new Error("Unable to establish a base compliant JSON optimization from the CRO copy loop.");
         }
       }
+
+      // Early-stop: model signals it's done, or confidence is already high.
+      const conf = typeof copyState?.confidence_score === "number" ? copyState.confidence_score : 0;
+      const confPct = conf <= 1 ? conf * 100 : conf;
+      if (copyState?.needs_more_refinement === false || confPct >= 92) {
+        break;
+      }
     }
+
+    if (!copyState) {
+      throw new Error("CRO copy optimization produced no usable result.");
+    }
+
+    // ── PHASE 2: Render the full HTML ONCE from the final copy ───────────────
+    const renderParts: any[] = [];
+    if (adImagePart) {
+      renderParts.push(adImagePart);
+    }
+    renderParts.push({
+      text: `
+        Build the FINAL personalized landing page as a single, complete HTML document.
+
+        [Scraped Data / Base Landing Page Content]:
+        ${scrapedContent}
+
+        [Final Optimized Copy (apply these exactly)]:
+        ${JSON.stringify(copyState.sections_optimized, null, 2)}
+
+        [Global Adjustments / Tone & Contrast]:
+        ${JSON.stringify(copyState.global_adjustments, null, 2)}
+
+        [User Vision / Audience / Accessibility]:
+        ${userVision}
+
+        REQUIREMENTS:
+        - Output ONLY raw HTML (no markdown, no code fences, no commentary). Start with <!DOCTYPE html>.
+        - Style with Tailwind CSS; assume <script src="https://cdn.tailwindcss.com"></script> is loaded in the <head>.
+        - Reconstruct the real page structure, brand identity, headings, benefits, review snippets, FAQ, and checkout CTAs from [Scraped Data], replacing copy with the [Final Optimized Copy].
+        - Preserve and reuse the exact original image URLs, product shots, background assets, and brand logos found in [Scraped Data] so they render in the preview.
+        - Use generous responsive padding, modern layouts (grids/columns), strong typography, clear risk-reversal banners, and the high-contrast/accessibility treatments from [User Vision]. Production-grade, never a basic card. It will be rendered inside an iframe for live conversion comparison.
+      `
+    });
+
+    const renderResponse = await generate({
+      model: GEMINI_MODEL,
+      contents: { parts: renderParts },
+      config: { systemInstruction: CRO_AGENT_SYSTEM_PROMPT },
+    });
+    let enhancedHtml = stripCodeFences(renderResponse.text || "");
+
+    // ── PHASE 3: One polish pass over the rendered HTML ──────────────────────
+    if (enhancedHtml) {
+      try {
+        await sleep(220);
+        const polishResponse = await generate({
+          model: GEMINI_MODEL,
+          contents: `
+            You are a senior conversion-focused front-end engineer. Improve the landing page below WITHOUT changing product facts, prices, or the meaning of the copy.
+            Tighten layout, spacing, visual hierarchy, contrast/accessibility, and mobile responsiveness. Ensure valid, self-contained HTML using the Tailwind CDN.
+
+            [Audience / Vision]: ${userVision}
+
+            Output ONLY the improved raw HTML (no markdown, no code fences, no commentary). Start with <!DOCTYPE html>.
+
+            [Current HTML]:
+            ${enhancedHtml}
+          `,
+          config: {},
+        });
+        const polished = stripCodeFences(polishResponse.text || "");
+        // Guard against a truncated/empty polish result clobbering a good render.
+        if (polished && polished.length > 200) {
+          enhancedHtml = polished;
+        }
+      } catch (polishErr) {
+        console.error("HTML polish pass failed; using pre-polish render:", polishErr);
+      }
+    }
+
+    const finalPayload: any = {
+      status: "success",
+      iteration: loopsRun,
+      mode: copyState.mode || "universal_cro_enhanced",
+      confidence_score: copyState.confidence_score,
+      global_adjustments: copyState.global_adjustments,
+      sections_optimized: copyState.sections_optimized,
+      change_log_summary: copyState.change_log_summary,
+      enhanced_html: enhancedHtml,
+    };
 
     const firecrawlKeyDetected = !!process.env.FIRECRAWL_API_KEY;
     const scrapeMethod = isMocked ? "mock_fallback" : "firecrawl_live";

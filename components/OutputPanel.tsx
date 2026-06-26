@@ -58,6 +58,14 @@ export default function OutputPanel({ data, onReset, userVision, targetUrl, logs
     setIsFullScreen(status);
   };
   
+  // The model/schema is inconsistent about confidence scale (0–1 fraction vs.
+  // 0–100 score), so normalize defensively to avoid rendering e.g. "9500%".
+  const rawConfidence = typeof data.confidence_score === "number" ? data.confidence_score : 0;
+  const confidenceDisplay = Math.max(
+    0,
+    Math.min(100, Math.round(rawConfidence <= 1 ? rawConfidence * 100 : rawConfidence))
+  );
+
   const sections = data.sections_optimized || [];
   const globalAdjustments = data.global_adjustments || {
     contrast_enhancements: "Standard optimal contrast.",
@@ -117,7 +125,7 @@ export default function OutputPanel({ data, onReset, userVision, targetUrl, logs
             <div className="flex items-center gap-4 bg-gray-50 p-3 rounded-xl border border-gray-100">
               <div className="text-center px-2">
                 <span className="text-xs text-gray-400 font-mono block uppercase">Confidence</span>
-                <span className="text-lg font-bold text-gray-800">{(data.confidence_score * 100).toFixed(0)}%</span>
+                <span className="text-lg font-bold text-gray-800">{confidenceDisplay}%</span>
               </div>
               <div className="h-8 w-[1px] bg-gray-200" />
               <div className="text-center px-2">
