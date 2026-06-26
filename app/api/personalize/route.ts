@@ -3,7 +3,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Type } from "@google/genai";
 import { CRO_AGENT_SYSTEM_PROMPT } from "@/app/lib/croAgentPrompt";
-import { GEMINI_MODEL, getGeminiKeys, createGeminiRotator, type GenerateFn } from "@/app/lib/geminiClient";
+import { GEMINI_MODEL } from "@/app/lib/geminiClient";
+import { createLLMGenerator, hasAnyProviderConfigured, type LLMGenerate } from "@/app/lib/llm";
 
 // This handler runs 5–10 sequential Gemini calls, each generating a full HTML
 // page, so it needs Node runtime and a long timeout. (Vercel caps maxDuration
@@ -39,7 +40,7 @@ function stripCodeFences(text: string): string {
  * @param audience Custom user objective or segment description to adapt mock tags
  * @returns Clean Markdown e-commerce page blueprint
  */
-async function generateMockScrape(generate: GenerateFn, url: string, audience: string): Promise<string> {
+async function generateMockScrape(generate: LLMGenerate, url: string, audience: string): Promise<string> {
   try {
     const domain = new URL(url).hostname.replace("www.", "");
     const brandName = domain.split(".")[0].toUpperCase() || "D2C Brand";
@@ -86,9 +87,14 @@ export async function POST(req: NextRequest) {
     const adCreative = body.ad_creative || body.adCreative || "";
     const adImageBase64 = body.ad_image || body.adImage || "";
     
-    // Build a key-rotating Gemini generator. Falls back across multiple keys on
-    // rate-limit / quota errors — valuable for free-tier keys across 5–10 loops.
-    const generate = createGeminiRotator(getGeminiKeys());
+    // Multi-provider generator: tries Gemini (rotating keys), then falls back to
+    // OpenRouter free models on overload / quota / transient errors.
+    if (!hasAnyProviderConfigured()) {
+      throw new Error(
+        "No AI provider configured. Set GEMINI_API_KEYS (or GEMINI_API_KEY) and/or OPENROUTER_API_KEY."
+      );
+    }
+    const generate = createLLMGenerator();
     
     // Bounds guard: Limit max loops strictly between 5 and 10 to satisfy constraint
     let maxLoops = parseInt(body.max_loops || body.maxLoops || "5", 10);
