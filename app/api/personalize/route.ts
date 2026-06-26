@@ -367,7 +367,7 @@ export async function POST(req: NextRequest) {
         - Output ONLY raw HTML (no markdown, no code fences, no commentary). Start with <!DOCTYPE html>.
         - Style with Tailwind CSS; assume <script src="https://cdn.tailwindcss.com"></script> is loaded in the <head>.
         - Reconstruct the real page structure, brand identity, headings, benefits, review snippets, FAQ, and checkout CTAs from [Scraped Data], replacing copy with the [Final Optimized Copy].
-        - Preserve and reuse the exact original image URLs, product shots, background assets, and brand logos found in [Scraped Data] so they render in the preview.
+        - IMAGES (important): Use ONLY image URLs that appear VERBATIM in [Scraped Data]. Never invent, guess, shorten, or modify an image URL, and never use placeholder-image services. Scraped product images are frequently hotlink-protected and will 404 inside the iframe, so for large HERO / banner / background areas DO NOT depend on an external image — use a tasteful CSS gradient or solid brand-colored background instead. Reuse real scraped image URLs only for small inline product shots or logos, and only if present verbatim. Never render a broken-image placeholder.
         - Use generous responsive padding, modern layouts (grids/columns), strong typography, clear risk-reversal banners, and the high-contrast/accessibility treatments from [User Vision]. Production-grade, never a basic card. It will be rendered inside an iframe for live conversion comparison.
       `
     });
@@ -379,11 +379,12 @@ export async function POST(req: NextRequest) {
     });
     let enhancedHtml = stripCodeFences(renderResponse.text || "");
 
-    // ── PHASE 3: One polish pass over the rendered HTML ──────────────────────
-    // Only if enough budget remains for another (slow) HTML generation —
-    // otherwise we ship the solid pre-polish render rather than risk a timeout.
+    // ── PHASE 3: Optional polish pass over the rendered HTML ─────────────────
+    // OFF by default: rewriting the whole page blind tended to corrupt image
+    // URLs (broken images) and adds a slow call. Re-enable with ENABLE_POLISH=true.
+    const enablePolish = process.env.ENABLE_POLISH === "true";
     const timeForPolish = Date.now() < startedAt + softBudgetMs - 14_000;
-    if (enhancedHtml && timeForPolish) {
+    if (enablePolish && enhancedHtml && timeForPolish) {
       try {
         await sleep(220);
         const polishResponse = await generate({
@@ -391,6 +392,7 @@ export async function POST(req: NextRequest) {
           contents: `
             You are a senior conversion-focused front-end engineer. Improve the landing page below WITHOUT changing product facts, prices, or the meaning of the copy.
             Tighten layout, spacing, visual hierarchy, contrast/accessibility, and mobile responsiveness. Ensure valid, self-contained HTML using the Tailwind CDN.
+            CRITICAL: Preserve every image URL / src and every background EXACTLY as-is — never replace, remove, alter, or substitute placeholder images. Do not introduce any new external image URLs.
 
             [Audience / Vision]: ${userVision}
 
